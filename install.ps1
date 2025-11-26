@@ -22,7 +22,7 @@ if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir }
 
 # --- 4. Download the pc_wipe_agent.py script ---
 Invoke-WebRequest `
-    -Uri "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/main/pc_wipe_agent.py" `
+    -Uri "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/refs/heads/main/pc_wipe_agent.py" `
     -OutFile "$dir\pc_wipe_agent.py"
 
 # --- 5. Create virtual environment ---
