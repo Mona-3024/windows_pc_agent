@@ -13,11 +13,11 @@ from cryptography.hazmat.primitives import serialization
 # CONFIGURATION
 # ==========================================
 API_KEY = "admin"
-PORT = 5055
+PORT = 5055  # Changed to 5055
 
 PC_NAME = "Office-PC-01"
 PC_LOCATION = "Head Office"
-PC_OWNER = "TGC"
+PC_OWNER = "John Doe"
 
 # Generate or load private key (runs once)
 KEY_FILE = "private_key.pem"
