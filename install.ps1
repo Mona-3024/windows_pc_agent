@@ -1,7 +1,6 @@
 # ===========================
 # WIPE AGENT – WINDOWS INSTALLER
 # ===========================
-
 Write-Host "Installing Windows PC Wipe Agent..."
 
 # --- 1. Check for admin privileges ---
@@ -28,7 +27,7 @@ Invoke-WebRequest `
 # --- 5. Create virtual environment ---
 python -m venv "$dir\venv"
 & "$dir\venv\Scripts\python.exe" -m pip install --upgrade pip
-& "$dir\venv\Scripts\python.exe" -m pip install flask psutil
+& "$dir\venv\Scripts\python.exe" -m pip install flask psutil cryptography
 
 # --- 6. Download and install NSSM (to run as service) ---
 Write-Host "Installing NSSM service manager..."
@@ -36,22 +35,39 @@ if (-not (Test-Path "C:\nssm\nssm.exe")) {
     New-Item -ItemType Directory -Path "C:\nssm" -Force
     Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile "C:\nssm\nssm.zip"
     Expand-Archive "C:\nssm\nssm.zip" "C:\nssm" -Force
-    Copy-Item "C:\nssm\*/win64/nssm.exe" "C:\nssm\nssm.exe" -Force
+    Copy-Item "C:\nssm\nssm-2.24\win64\nssm.exe" "C:\nssm\nssm.exe" -Force
 }
-
 $nssm = "C:\nssm\nssm.exe"
 
-# --- 7. Install pc_wipe_agent as a Windows service ---
+# --- 7. Remove existing service if present ---
+$existingService = Get-Service pc_wipe_agent -ErrorAction SilentlyContinue
+if ($existingService) {
+    Write-Host "Removing existing service..."
+    Stop-Service pc_wipe_agent -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    & $nssm remove pc_wipe_agent confirm
+    Start-Sleep -Seconds 2
+}
+
+# --- 8. Install pc_wipe_agent as a Windows service ---
 & $nssm install pc_wipe_agent "$dir\venv\Scripts\python.exe" "$dir\pc_wipe_agent.py"
+& $nssm set pc_wipe_agent AppDirectory "$dir"
 & $nssm set pc_wipe_agent Start SERVICE_AUTO_START
 & $nssm set pc_wipe_agent AppRestartDelay 3000
 
-# --- 8. Start the service ---
+# --- 9. Start the service ---
 Start-Service pc_wipe_agent
+
+# --- 10. Wait and verify ---
+Start-Sleep -Seconds 3
+$service = Get-Service pc_wipe_agent
 
 Write-Host "===================================="
 Write-Host " PC WIPE AGENT INSTALLED SUCCESSFULLY"
 Write-Host " Service Name : pc_wipe_agent"
+Write-Host " Service Status : $($service.Status)"
 Write-Host " Runs at Boot : YES"
-Write-Host " API Port     : 5050"
+Write-Host " API Port     : 5055"
 Write-Host "===================================="
+Write-Host ""
+Write-Host "Test with: curl http://localhost:5055/"
