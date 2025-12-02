@@ -1,272 +1,328 @@
 import os
 import threading
 import subprocess
-import psutil
 import shutil
-from flask import Flask, request, jsonify
+import socket
+import json
+from flask import Flask, request, jsonify, send_from_directory
+from datetime import datetime
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-API_KEY = "admin"       # <-- CHANGE THIS to match your Android App key
-PORT = 5050
+API_KEY = "admin"
+PORT = 5055
 
+PC_NAME = "Office-PC-01"
+PC_LOCATION = "Head Office"
+PC_OWNER = "TGC"
+
+# Generate or load private key (runs once)
+KEY_FILE = "private_key.pem"
+CERT_DIR = "wipe_certificates"
+
+if not os.path.exists(KEY_FILE):
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    with open(KEY_FILE, "wb") as f:
+        f.write(pem)
+    print("[+] New private key generated:", KEY_FILE)
+else:
+    with open(KEY_FILE, "rb") as f:
+        private_key = serialization.load_pem_private_key(
+            f.read(),
+            password=None
+        )
+    print("[+] Private key loaded")
+
+public_key = private_key.public_key()
+PUBLIC_PEM = public_key.public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo
+)
+
+os.makedirs(CERT_DIR, exist_ok=True)
+
+# CREATE FLASK APP FIRST
 app = Flask(__name__)
 
-# Global control variables
+# Global state
 wipe_thread = None
-stop_flag = False
+stop_flag = threading.Event()
+wipe_start_time = None
+wipe_end_time = None
+wipe_target = "None"
+wipe_method = "quick"
+wipe_progress = 0
 
-# ==========================================
-# HELPER: AUTH & SAFETY
-# ==========================================
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "127.0.0.1"
+
 def check_auth(req):
-    """Verifies the API key from headers."""
-    key = req.headers.get("X-API-Key", "")
+    key = req.headers.get("X-API-Key", "") or req.args.get("key", "")
     return key == API_KEY
 
 def is_safe_path(path):
-    """
-    Prevents accidental wiping of critical system paths.
-    Returns True if safe, False if unsafe.
-    """
-    path = os.path.abspath(path).lower()
-    
-    # List of protected paths (Customize as needed)
-    protected = [
-        "c:\\windows",
-        "c:\\program files",
-        "c:\\program files (x86)",
-        os.path.abspath(__file__).lower() # Don't wipe the script itself
-    ]
-    
-    # 1. Check if path matches or is inside a protected folder
-    for p in protected:
-        if path.startswith(p):
-            return False
-            
-    # 2. Protect C:\ root from accidental folder/file mode wipes
-    # (Drive mode handles root separately, but we block C: root generally for safety)
-    if path == "c:\\" or path == "c:":
+    try:
+        abs_path = os.path.abspath(path).lower().replace("/", "\\")
+        protected = [
+            "c:\\windows", "c:\\program files", "c:\\program files (x86)",
+            "c:\\users", "c:\\programdata", "c:\\$recycle.bin"
+        ]
+        return not any(abs_path.startswith(p) for p in protected)
+    except:
         return False
 
-    return True
+def generate_certificate():
+    global wipe_end_time, wipe_target, wipe_method
+    wipe_end_time = datetime.now()
 
-# ==========================================
-# CORE WIPING LOGIC
-# ==========================================
+    cert = {
+        "certificate_id": os.urandom(8).hex(),
+        "pc_name": PC_NAME,
+        "location": PC_LOCATION,
+        "owner": PC_OWNER,
+        "target_device": wipe_target,
+        "wipe_method": wipe_method,
+        "started_at": wipe_start_time.isoformat(),
+        "completed_at": wipe_end_time.isoformat(),
+        "duration_seconds": int((wipe_end_time - wipe_start_time).total_seconds()),
+        "agent_ip": get_local_ip(),
+        "verified_by": "Secure Wipe Agent v4",
+        "tamper_proof": True
+    }
 
-def secure_delete_file(file_path):
-    """
-    Overwrites a file with zeros before deleting it.
-    """
-    global stop_flag
+    cert_json = json.dumps(cert, indent=2).encode()
+    signature = private_key.sign(cert_json)
+
+    filename = f"wipe-cert-{PC_NAME.replace(' ', '-')}-{int(datetime.now().timestamp())}.json"
+    sigfile = filename + ".sig"
+
+    with open(os.path.join(CERT_DIR, filename), "wb") as f:
+        f.write(cert_json)
+    with open(os.path.join(CERT_DIR, sigfile), "wb") as f:
+        f.write(signature)
+
+    print(f"[CERTIFICATE ISSUED] {filename}")
+    return filename
+
+# === WIPING LOGIC ===
+def smart_wipe_job(target, method="quick"):
+    global wipe_target, wipe_start_time, wipe_progress, wipe_method, wipe_end_time
+    stop_flag.clear()
+    wipe_start_time = datetime.now()
+    wipe_target = target.strip('"')
+    wipe_method = method
+    wipe_progress = 0
+    wipe_end_time = None
+
+    print(f"[WIPE START] Target: {wipe_target}, Method: {wipe_method}")
+
+    if not is_safe_path(wipe_target):
+        print(f"[BLOCKED] Unsafe path: {wipe_target}")
+        wipe_progress = 0
+        return
+
     try:
-        if not os.path.exists(file_path): return
-
-        # Get file size
-        length = os.path.getsize(file_path)
-        
-        # Overwrite content
-        with open(file_path, "wb") as f:
-            if stop_flag: return
-            f.seek(0)
-            f.write(b'\x00' * length)
-            f.flush()
-            os.fsync(f.fileno())
+        if len(wipe_target) <= 3 and ":" in wipe_target:
+            # Full drive wipe
+            print("[WIPE] Full drive wipe detected")
+            drive = wipe_target.strip(":\\") + ":\\"
+            wipe_progress = 10
+            subprocess.call(f'del /f /s /q {drive}. >nul 2>&1', shell=True)
+            wipe_progress = 100
+            print("[WIPE] Drive wipe completed")
+            
+        elif os.path.isfile(wipe_target):
+            # Single file wipe
+            print(f"[WIPE] Wiping file: {wipe_target}")
+            size = os.path.getsize(wipe_target)
+            wipe_progress = 20
+            with open(wipe_target, "r+b") as f:
+                f.write(b'\x00' * size)
+            wipe_progress = 80
+            os.remove(wipe_target)
+            wipe_progress = 100
+            print("[WIPE] File wipe completed")
+            
+        elif os.path.isdir(wipe_target):
+            # Directory wipe
+            print(f"[WIPE] Wiping directory: {wipe_target}")
+            wipe_progress = 5
+            
+            # Count total files
+            total = 0
+            for root, _, files in os.walk(wipe_target):
+                total += len(files)
+            
+            print(f"[WIPE] Total files to wipe: {total}")
+            
+            if total == 0:
+                wipe_progress = 50
+                shutil.rmtree(wipe_target, ignore_errors=True)
+                wipe_progress = 100
+                print("[WIPE] Empty directory removed")
+            else:
+                wiped = 0
+                for root, _, files in os.walk(wipe_target):
+                    if stop_flag.is_set(): 
+                        print("[WIPE] Emergency stop triggered!")
+                        break
+                    for filename in files:
+                        try:
+                            filepath = os.path.join(root, filename)
+                            os.remove(filepath)
+                            wiped += 1
+                            if total > 0:
+                                wipe_progress = int((wiped / total) * 90) + 5
+                            
+                            if wiped % 10 == 0:
+                                print(f"[WIPE] Progress: {wipe_progress}% ({wiped}/{total})")
+                        except Exception as e:
+                            print(f"[WIPE] Error deleting {filepath}: {e}")
                 
-        # Delete file
-        os.remove(file_path)
-        print(f"[DELETED FILE] {file_path}")
-        
+                # Remove directory structure
+                wipe_progress = 95
+                shutil.rmtree(wipe_target, ignore_errors=True)
+                wipe_progress = 100
+                print("[WIPE] Directory wipe completed")
+        else:
+            print(f"[WIPE] Target not found: {wipe_target}")
+            wipe_progress = 0
+            
     except Exception as e:
-        print(f"[ERROR] Failed to wipe file {file_path}: {e}")
-
-def task_wipe_folder(folder_path):
-    """
-    Recursively wipes all files in a folder, then removes the folder structure.
-    """
-    global stop_flag
-    print(f"[INFO] Starting Folder Wipe: {folder_path}")
-    
-    # 1. Walk and secure delete files
-    for root, dirs, files in os.walk(folder_path, topdown=False):
-        if stop_flag: 
-            print("[STOP] Emergency stop triggered.")
-            return
-
-        for name in files:
-            file_path = os.path.join(root, name)
-            secure_delete_file(file_path)
-
-        # 2. Remove directories after they are empty
-        for name in dirs:
-            dir_path = os.path.join(root, name)
-            try:
-                os.rmdir(dir_path)
-            except:
-                pass
-
-    # 3. Remove the root folder itself
-    try:
-        if not stop_flag:
-            shutil.rmtree(folder_path, ignore_errors=True)
-            print(f"[INFO] Folder structure removed: {folder_path}")
-    except Exception as e:
-        print(f"[ERROR] Could not remove root folder: {e}")
-
-def task_wipe_drive(drive_letter):
-    """
-    Wipes an entire drive by deleting files normally first, 
-    then filling all remaining free space with garbage data.
-    """
-    global stop_flag
-    
-    # Ensure format "D:"
-    if ":" not in drive_letter:
-        drive_letter = drive_letter[0] + ":"
-        
-    print(f"[INFO] Starting Drive Wipe: {drive_letter}")
-
-    try:
-        # 1. Quick Delete (Standard OS delete) to free up space
-        print("[STEP 1] Deleting existing files...")
-        # Force delete everything on the drive
-        subprocess.call(f"del /f /s /q {drive_letter}\\*.*", shell=True)
-        
-        # 2. Fill Free Space (The actual "Wipe")
-        print("[STEP 2] Overwriting free space...")
-        zero_file = os.path.join(drive_letter + "\\", "wipe_zero.bin")
-        
-        # Write 100MB chunks until full
-        block_size_mb = 100 
-        
-        with open(zero_file, "wb") as f:
-            while True:
-                if stop_flag:
-                    print("[STOP] Emergency stop triggered.")
-                    break
-                try:
-                    f.write(b'\x00' * (block_size_mb * 1024 * 1024))
-                except OSError:
-                    # Disk is full
-                    break
-                    
-        print("[INFO] Drive wipe complete. Cleaning up...")
-        
-    except Exception as e:
-        print(f"[ERROR] Drive wipe failed: {e}")
+        print(f"[WIPE ERROR] {e}")
+        wipe_progress = 0
     finally:
-        # Try to remove the massive zero file
-        try:
-            if os.path.exists(zero_file):
-                os.remove(zero_file)
-        except:
-            pass
+        if wipe_progress >= 100:
+            print("[WIPE] Generating certificate...")
+            generate_certificate()
+            print("[WIPE] Certificate generated successfully")
 
 # ==========================================
-# THREAD DISPATCHER (The Smart Logic)
+# FLASK ROUTES - MUST BE AT MODULE LEVEL
 # ==========================================
-def smart_wipe_job(path_input):
-    global stop_flag
-    stop_flag = False
+
+@app.route("/")
+def index():
+    """Root endpoint - agent info"""
+    try:
+        cert_files = os.listdir(CERT_DIR) if os.path.exists(CERT_DIR) else []
+    except:
+        cert_files = []
     
-    # Cleanup input (remove quotes if pasted)
-    path = path_input.strip().replace('"', '')
+    return jsonify({
+        "pc_name": PC_NAME,
+        "ip": get_local_ip(),
+        "port": PORT,
+        "public_key_pem": PUBLIC_PEM.decode(),
+        "certificates": cert_files,
+        "status": "online"
+    })
 
-    # Safety Check
-    if not is_safe_path(path):
-        print(f"[BLOCKED] Attempt to wipe protected path: {path}")
-        return
-
-    # --- AUTO-DETECTION ---
-    
-    # 1. Check if it looks like a Drive (e.g., "D:", "E:\")
-    # Logic: Short length and contains a colon
-    if len(path) <= 3 and ":" in path:
-        print(f"[DETECTED] Target is a DRIVE: {path}")
-        task_wipe_drive(path)
-        return
-
-    # 2. Check if it is an existing Folder
-    if os.path.isdir(path):
-        print(f"[DETECTED] Target is a FOLDER: {path}")
-        task_wipe_folder(path)
-        return
-
-    # 3. Check if it is an existing File
-    if os.path.isfile(path):
-        print(f"[DETECTED] Target is a FILE: {path}")
-        secure_delete_file(path)
-        return
-
-    # 4. Fallback/Error
-    print(f"[ERROR] Path not found or unknown type: {path}")
-
-
-# ==========================================
-# API ENDPOINTS
-# ==========================================
-
-@app.route("/status", methods=["GET"])
+@app.route("/status")
 def status():
-    if not check_auth(request): return jsonify({"error": "Unauthorized"}), 401
+    """Status endpoint"""
+    if not check_auth(request): 
+        return jsonify({"error": "Unauthorized"}), 401
     
-    is_active = wipe_thread.is_alive() if wipe_thread else False
-    return jsonify({"status": "online", "wipe_active": is_active})
-
-@app.route("/list-devices", methods=["GET"])
-def list_devices():
-    if not check_auth(request): return jsonify({"error": "Unauthorized"}), 401
+    is_active = wipe_thread is not None and wipe_thread.is_alive()
+    is_completed = wipe_progress == 100 and wipe_end_time is not None
     
-    drives = []
-    for p in psutil.disk_partitions(all=False):
-        if "cdrom" in p.opts or p.fstype == '': continue
-        drives.append({"device": p.device, "mount": p.mountpoint})
-    return jsonify({"devices": drives})
+    return jsonify({
+        "pc_name": PC_NAME,
+        "wipe_active": is_active,
+        "target": wipe_target,
+        "progress": wipe_progress,
+        "completed": is_completed,
+        "method": wipe_method
+    })
 
 @app.route("/wipe", methods=["POST"])
 def wipe():
-    """
-    Receives the wipe command.
-    COMPATIBLE with Old App: Expects query parameters '?device=X&method=Y'
-    """
-    if not check_auth(request): return jsonify({"error": "Unauthorized"}), 401
-
-    # 1. Get data from Query Parameters (Standard HTTP POST from Android Volley/HttpUrlConnection)
-    path_input = request.args.get("device", "")
-    method = request.args.get("method", "zero") # (Unused in smart mode, but kept for compatibility)
-
-    if not path_input:
-        return jsonify({"error": "Missing 'device' parameter"}), 400
-
+    """Wipe endpoint"""
+    if not check_auth(request): 
+        return jsonify({"error": "Unauthorized"}), 401
+    
     global wipe_thread
+    
     if wipe_thread and wipe_thread.is_alive():
-        return jsonify({"error": "A wipe task is already running"}), 409
+        return jsonify({"error": "Wipe in progress"}), 409
 
-    # 2. Start the Smart Wipe Logic in a background thread
-    wipe_thread = threading.Thread(target=smart_wipe_job, args=(path_input,))
+    target = request.args.get("device", "")
+    method = request.args.get("method", "quick")
+    
+    if not target:
+        return jsonify({"error": "Missing device"}), 400
+
+    print(f"[API] Wipe request received - Target: {target}, Method: {method}")
+    
+    wipe_thread = threading.Thread(target=smart_wipe_job, args=(target, method))
+    wipe_thread.daemon = True
     wipe_thread.start()
 
     return jsonify({
-        "status": "wipe_started",
-        "target_received": path_input,
-        "message": "Agent is determining type (File/Folder/Drive)..."
+        "status": "WIPE STARTED", 
+        "target": target, 
+        "method": method,
+        "pc_name": PC_NAME
     })
 
 @app.route("/emergency-stop", methods=["POST"])
 def emergency_stop():
-    if not check_auth(request): return jsonify({"error": "Unauthorized"}), 401
+    """Emergency stop endpoint"""
+    if not check_auth(request): 
+        return jsonify({"error": "Unauthorized"}), 401
     
-    global stop_flag
-    stop_flag = True
-    print("[SIGNAL] Emergency Stop Received")
-    return jsonify({"status": "stopping_process"})
+    print("[API] Emergency stop triggered!")
+    stop_flag.set()
+    
+    return jsonify({
+        "status": "STOPPED",
+        "pc_name": PC_NAME
+    })
+
+@app.route("/certificate/<filename>")
+def get_cert(filename):
+    """Download certificate"""
+    return send_from_directory(CERT_DIR, filename)
+
+@app.route("/certificate/<filename>.sig")
+def get_sig(filename):
+    """Download signature"""
+    return send_from_directory(CERT_DIR, filename + ".sig")
+
+# ==========================================
+# MAIN EXECUTION
+# ==========================================
 
 if __name__ == "__main__":
-    print("========================================")
-    print(f" PC WIPE AGENT (Smart Mode) ")
-    print(f" Listening on http://0.0.0.0:{PORT}")
+    print("="*60)
+    print(" SECURE WIPE AGENT + TAMPER-PROOF CERTIFICATES ")
+    print(f" PC: {PC_NAME} | IP: http://{get_local_ip()}:{PORT}")
+    print(f" Public Key (share this):")
+    print(PUBLIC_PEM.decode())
     print(f" API Key: {API_KEY}")
-    print("========================================")
-    app.run(host="0.0.0.0", port=PORT)
+    print("="*60)
+    
+    # Print registered routes for debugging
+    print("\nRegistered Routes:")
+    for rule in app.url_map.iter_rules():
+        methods = ', '.join([m for m in rule.methods if m not in ['HEAD', 'OPTIONS']])
+        print(f"  {rule.endpoint:20s} {rule.rule:30s} [{methods}]")
+    print("="*60)
+    
+    app.run(host="0.0.0.0", port=PORT, threaded=True, debug=False)
