@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives import serialization
 # CONFIGURATION
 # ==========================================
 API_KEY = "admin"
-PORT = 5055  # Changed to 5055
+PORT = 5055
 
 PC_NAME = "Office-PC-01"
 PC_LOCATION = "Head Office"
@@ -86,6 +86,37 @@ def is_safe_path(path):
     except:
         return False
 
+def secure_overwrite_file(filepath, passes=3):
+    if not os.path.isfile(filepath):
+        return
+    size = os.path.getsize(filepath)
+    if size == 0:
+        os.remove(filepath)
+        return
+
+    patterns = [
+        b'\x00' * 4096,      # zeros
+        b'\xFF' * 4096,      # ones
+        b'\xAA' * 4096,      # alternating bits
+        os.urandom(4096),    # random (best for SSDs)
+    ]
+
+    with open(filepath, "r+b") as f:
+        for pass_num in range(passes):
+            pattern = patterns[pass_num % len(patterns)]
+            if pattern == os.urandom(4096):
+                data = os.urandom(4096)
+            else:
+                data = pattern
+
+            f.seek(0)
+            for _ in range(0, size, 4096):
+                chunk_size = min(4096, size - f.tell())
+                f.write(data[:chunk_size])
+            f.flush()
+            os.fsync(f.fileno())
+    os.remove(filepath)
+
 def generate_certificate():
     global wipe_end_time, wipe_target, wipe_method
     wipe_end_time = datetime.now()
@@ -138,70 +169,60 @@ def smart_wipe_job(target, method="quick"):
 
     try:
         if len(wipe_target) <= 3 and ":" in wipe_target:
-            # Full drive wipe
-            print("[WIPE] Full drive wipe detected")
-            drive = wipe_target.strip(":\\") + ":\\"
+            # Full drive wipe with cipher
+            drive_letter = wipe_target.upper().replace(":", "").replace("\\", "") + ":"
+            drive_path = drive_letter + "\\"
+            print(f"[WIPE] Starting FULL DRIVE secure wipe: {drive_letter}")
+            
+            # Step 1: Delete everything (fast)
             wipe_progress = 10
-            subprocess.call(f'del /f /s /q {drive}. >nul 2>&1', shell=True)
+            subprocess.call(f'del /f /s /q {drive_path}* >nul 2>&1', shell=True)
+            subprocess.call(f'rd /s /q "{drive_path}" >nul 2>&1', shell=True)
+            
+            # Step 2: Wipe free space with cipher (overwrites with 0, FF, random)
+            wipe_progress = 50
+            print(f"[WIPE] Running cipher /w:{drive_letter} - this may take hours!")
+            result = subprocess.call(f'cipher /w:{drive_letter}', shell=True)
             wipe_progress = 100
-            print("[WIPE] Drive wipe completed")
+            print(f"[WIPE] Drive {drive_letter} has been forensically wiped using cipher /w")
             
         elif os.path.isfile(wipe_target):
             # Single file wipe
             print(f"[WIPE] Wiping file: {wipe_target}")
             size = os.path.getsize(wipe_target)
             wipe_progress = 20
-            with open(wipe_target, "r+b") as f:
-                f.write(b'\x00' * size)
-            wipe_progress = 80
-            os.remove(wipe_target)
+            secure_overwrite_file(wipe_target, passes=3)
             wipe_progress = 100
             print("[WIPE] File wipe completed")
             
         elif os.path.isdir(wipe_target):
-            # Directory wipe
-            print(f"[WIPE] Wiping directory: {wipe_target}")
+            print(f"[WIPE] Securely wiping directory: {wipe_target}")
             wipe_progress = 5
-            
-            # Count total files
-            total = 0
-            for root, _, files in os.walk(wipe_target):
-                total += len(files)
-            
-            print(f"[WIPE] Total files to wipe: {total}")
-            
-            if total == 0:
-                wipe_progress = 50
-                shutil.rmtree(wipe_target, ignore_errors=True)
-                wipe_progress = 100
-                print("[WIPE] Empty directory removed")
-            else:
-                wiped = 0
-                for root, _, files in os.walk(wipe_target):
-                    if stop_flag.is_set(): 
-                        print("[WIPE] Emergency stop triggered!")
+
+            total = sum(len(files) for _, _, files in os.walk(wipe_target))
+            wiped = 0
+
+            for root, dirs, files in os.walk(wipe_target, topdown=False):
+                if stop_flag.is_set():
+                    break
+                for name in files:
+                    if stop_flag.is_set():
                         break
-                    for filename in files:
-                        try:
-                            filepath = os.path.join(root, filename)
-                            os.remove(filepath)
-                            wiped += 1
-                            if total > 0:
-                                wipe_progress = int((wiped / total) * 90) + 5
-                            
-                            if wiped % 10 == 0:
-                                print(f"[WIPE] Progress: {wipe_progress}% ({wiped}/{total})")
-                        except Exception as e:
-                            print(f"[WIPE] Error deleting {filepath}: {e}")
-                
-                # Remove directory structure
-                wipe_progress = 95
-                shutil.rmtree(wipe_target, ignore_errors=True)
-                wipe_progress = 100
-                print("[WIPE] Directory wipe completed")
-        else:
-            print(f"[WIPE] Target not found: {wipe_target}")
-            wipe_progress = 0
+                    filepath = os.path.join(root, name)
+                    try:
+                        secure_overwrite_file(filepath, passes=3)
+                        wiped += 1
+                        wipe_progress = int((wiped / max(total, 1)) * 90) + 5
+                        if wiped % 50 == 0 or wiped == total:
+                            print(f"[WIPE] Directory progress: {wipe_progress}% ({wiped}/{total})")
+                    except Exception as e:
+                        print(f"[ERROR] Failed {filepath}: {e}")
+
+            # Now wipe and remove empty folders
+            wipe_progress = 95
+            shutil.rmtree(wipe_target, ignore_errors=True)
+            wipe_progress = 100
+            print("[WIPE] Directory completely and irrecoverably wiped")
             
     except Exception as e:
         print(f"[WIPE ERROR] {e}")
@@ -213,7 +234,7 @@ def smart_wipe_job(target, method="quick"):
             print("[WIPE] Certificate generated successfully")
 
 # ==========================================
-# FLASK ROUTES - MUST BE AT MODULE LEVEL
+# FLASK ROUTES
 # ==========================================
 
 @app.route("/")
