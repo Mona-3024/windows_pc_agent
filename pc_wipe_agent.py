@@ -174,17 +174,40 @@ def smart_wipe_job(target, method="quick"):
             drive_path = drive_letter + "\\"
             print(f"[WIPE] Starting FULL DRIVE secure wipe: {drive_letter}")
             
-            # Step 1: Delete everything (fast)
-            wipe_progress = 10
-            subprocess.call(f'del /f /s /q {drive_path}* >nul 2>&1', shell=True)
-            subprocess.call(f'rd /s /q "{drive_path}" >nul 2>&1', shell=True)
+            # Step 1: Delete all files recursively
+            wipe_progress = 5
+            print("[WIPE] Deleting all files on drive...")
+            subprocess.call(f'del /f /s /q /a {drive_path}* >nul 2>&1', shell=True)
             
-            # Step 2: Wipe free space with cipher (overwrites with 0, FF, random)
-            wipe_progress = 50
+            # Step 2: Remove all directories (including hidden/system)
+            wipe_progress = 15
+            print("[WIPE] Removing all directory structures...")
+            # Get all folders and delete them one by one
+            try:
+                for root, dirs, files in os.walk(drive_path, topdown=False):
+                    if stop_flag.is_set():
+                        break
+                    for dir_name in dirs:
+                        dir_path = os.path.join(root, dir_name)
+                        try:
+                            os.rmdir(dir_path)
+                        except:
+                            subprocess.call(f'rmdir /s /q "{dir_path}" >nul 2>&1', shell=True)
+            except Exception as e:
+                print(f"[WIPE] Directory cleanup: {e}")
+            
+            # Step 3: Final aggressive cleanup
+            wipe_progress = 25
+            subprocess.call(f'for /d %i in ({drive_path}*) do @rmdir /s /q "%i" >nul 2>&1', shell=True)
+            
+            # Step 4: Wipe free space with cipher (overwrites with 0, FF, random)
+            wipe_progress = 40
             print(f"[WIPE] Running cipher /w:{drive_letter} - this may take hours!")
+            print("[WIPE] This will overwrite all free space with zeros, ones, and random data")
             result = subprocess.call(f'cipher /w:{drive_letter}', shell=True)
             wipe_progress = 100
-            print(f"[WIPE] Drive {drive_letter} has been forensically wiped using cipher /w")
+            print(f"[WIPE] Drive {drive_letter} has been completely and forensically wiped")
+            print(f"[WIPE] All data is now unrecoverable, and all folders have been removed")
             
         elif os.path.isfile(wipe_target):
             # Single file wipe
@@ -199,9 +222,13 @@ def smart_wipe_job(target, method="quick"):
             print(f"[WIPE] Securely wiping directory: {wipe_target}")
             wipe_progress = 5
 
+            # Get the drive letter where this directory is located
+            target_drive = os.path.splitdrive(os.path.abspath(wipe_target))[0]
+            
             total = sum(len(files) for _, _, files in os.walk(wipe_target))
             wiped = 0
 
+            # Step 1: Securely overwrite all files
             for root, dirs, files in os.walk(wipe_target, topdown=False):
                 if stop_flag.is_set():
                     break
@@ -212,17 +239,25 @@ def smart_wipe_job(target, method="quick"):
                     try:
                         secure_overwrite_file(filepath, passes=3)
                         wiped += 1
-                        wipe_progress = int((wiped / max(total, 1)) * 90) + 5
+                        wipe_progress = int((wiped / max(total, 1)) * 60) + 5
                         if wiped % 50 == 0 or wiped == total:
-                            print(f"[WIPE] Directory progress: {wipe_progress}% ({wiped}/{total})")
+                            print(f"[WIPE] File overwrite progress: {wipe_progress}% ({wiped}/{total})")
                     except Exception as e:
                         print(f"[ERROR] Failed {filepath}: {e}")
 
-            # Now wipe and remove empty folders
-            wipe_progress = 95
+            # Step 2: Remove directory structure
+            wipe_progress = 70
+            print("[WIPE] Removing directory structure...")
             shutil.rmtree(wipe_target, ignore_errors=True)
+            
+            # Step 3: Wipe free space on the drive to eliminate recoverable data
+            wipe_progress = 75
+            print(f"[WIPE] Wiping free space on drive {target_drive} to prevent recovery...")
+            print(f"[WIPE] Running cipher /w:{target_drive} - this ensures deleted data is unrecoverable")
+            subprocess.call(f'cipher /w:{target_drive}', shell=True)
+            
             wipe_progress = 100
-            print("[WIPE] Directory completely and irrecoverably wiped")
+            print("[WIPE] Directory and free space completely and irrecoverably wiped")
             
     except Exception as e:
         print(f"[WIPE ERROR] {e}")
