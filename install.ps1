@@ -1,14 +1,21 @@
 # =================================================
-# SECURE WIPE AGENT - BULLETPROOF INSTALLER v3
-# Works even when old service is running & files locked
+# SECURE WIPE AGENT - BULLETPROOF INSTALLER v3.1
+# FIXES: Forces TLS 1.2 for GitHub downloads
 # =================================================
 $ErrorActionPreference = "Stop"
+
+# --- CRITICAL FIX: FORCE TLS 1.2 FOR GITHUB ---
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# ----------------------------------------------
+
 $InstallDir    = "C:\ProgramData\SecureWipeAgent"
 $ServiceName   = "SecureWipeAgent"
-$ScriptUrl     = "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/refs/heads/main/pc_wipe_agent.py"
+# Switched to raw.githubusercontent to avoid 302 Redirect issues
+$ScriptUrl     = "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/main/pc_wipe_agent.py"
+$NssmUrl       = "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/main/nssm.exe"
 
-Write-Host "`nSECURE WIPE AGENT - CLEAN REINSTALL" -ForegroundColor Cyan
-Write-Host "========================================`n" -ForegroundColor Cyan
+Write-Host "`nSECURE WIPE AGENT - CLEAN REINSTALL (TLS 1.2 FIXED)" -ForegroundColor Cyan
+Write-Host "====================================================`n" -ForegroundColor Cyan
 
 # === STEP 1: KILL EVERYTHING BRUTALLY ===
 Write-Host "[1/6] Killing all Python processes from $InstallDir..." -ForegroundColor Yellow
@@ -51,7 +58,12 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 attrib +h $InstallDir  # hide it
 
 Write-Host "[5/6] Downloading latest agent..." -ForegroundColor Green
-Invoke-WebRequest -Uri $ScriptUrl -OutFile "$InstallDir\pc_wipe_agent.py" -UseBasicParsing
+try {
+    Invoke-WebRequest -Uri $ScriptUrl -OutFile "$InstallDir\pc_wipe_agent.py" -UseBasicParsing
+} catch {
+    Write-Error "Failed to download agent script. Check internet or URL."
+    exit 1
+}
 
 Write-Host "[6/6] Setting up Python venv + dependencies..." -ForegroundColor Green
 & python -m venv "$InstallDir\venv" --clear
@@ -59,10 +71,21 @@ Write-Host "[6/6] Setting up Python venv + dependencies..." -ForegroundColor Gre
 & "$InstallDir\venv\Scripts\pip.exe" install --quiet flask cryptography
 
 # === STEP 5: Install as clean auto-start service using NSSM (best method) ===
-$NssmUrl = "https://github.com/Mona-3024/windows_pc_agent/raw/main/nssm.exe"
 $NssmPath = "$InstallDir\nssm.exe"
 Write-Host "Installing NSSM service manager..." -ForegroundColor Green
-Invoke-WebRequest -Uri $NssmUrl -OutFile $NssmPath -UseBasicParsing
+
+try {
+    # Using the direct raw link which is more reliable
+    Invoke-WebRequest -Uri $NssmUrl -OutFile $NssmPath -UseBasicParsing
+} catch {
+    Write-Error "Failed to download NSSM. The TLS handshake failed or the file is missing."
+    exit 1
+}
+
+if (-not (Test-Path $NssmPath)) {
+    Write-Error "NSSM download failed silently. File not found."
+    exit 1
+}
 
 & $NssmPath install $ServiceName `"$InstallDir\venv\Scripts\python.exe`" `"$InstallDir\pc_wipe_agent.py`"
 & $NssmPath set $ServiceName DisplayName "Windows Security Agent"
