@@ -110,20 +110,21 @@ try {
 
 # === STEP 6: Install service ===
 Write-Host "    Registering Windows service..." -ForegroundColor Gray
-& $NssmPath install $ServiceName `"$InstallDir\venv\Scripts\python.exe`" `"$InstallDir\pc_wipe_agent.py`"
-& $NssmPath set $ServiceName DisplayName "Windows Security Agent"
-& $NssmPath set $ServiceName Description "Secure data sanitization service"
-& $NssmPath set $ServiceName Start SERVICE_AUTO_START
-& $NssmPath set $ServiceName AppDirectory $InstallDir
-& $NssmPath set $ServiceName AppStdout "$InstallDir\service.log"
-& $NssmPath set $ServiceName AppStderr "$InstallDir\error.log"
-& $NssmPath set $ServiceName AppRotateFiles 1
-& $NssmPath set $ServiceName AppRotateBytes 1048576
+
+& "$NssmPath" install $ServiceName "$InstallDir\venv\Scripts\python.exe" "$InstallDir\pc_wipe_agent.py"
+
+& "$NssmPath" set $ServiceName DisplayName "Windows Security Agent"
+& "$NssmPath" set $ServiceName Description "Secure data sanitization service"
+& "$NssmPath" set $ServiceName Start SERVICE_AUTO_START
+& "$NssmPath" set $ServiceName AppDirectory "$InstallDir"
+& "$NssmPath" set $ServiceName AppStdout "$InstallDir\service.log"
+& "$NssmPath" set $ServiceName AppStderr "$InstallDir\error.log"
+& "$NssmPath" set $ServiceName AppRotateFiles 1
+& "$NssmPath" set $ServiceName AppRotateBytes 1048576
 
 Write-Host "    Starting service..." -ForegroundColor Gray
 Start-Service $ServiceName
 
-# Wait for service to start
 Start-Sleep -Seconds 3
 
 # === STEP 7: Verify installation ===
