@@ -107,6 +107,25 @@ try {
     Write-Error "Venv / pip setup failed: $_"
     exit 1
 }
+# === DOWNLOAD + EXTRACT NSSM ===
+Write-Host "    Downloading NSSM (Service Manager)..." -ForegroundColor Gray
+
+$NssmZip = "$InstallDir\nssm.zip"
+Invoke-WebRequest -Uri $NssmUrl -OutFile $NssmZip -UseBasicParsing
+
+# Extract ZIP
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory($NssmZip, "$InstallDir\nssm")
+
+# Detect correct EXE (inside win64 or win32 folder)
+$NssmPath = Get-ChildItem -Path "$InstallDir\nssm" -Recurse -Filter "nssm.exe" | Select-Object -First 1 | ForEach-Object { $_.FullName }
+
+if (-not $NssmPath) {
+    Write-Error "NSSM exe not found! ZIP extraction may have failed."
+    exit 1
+}
+
+Write-Host "    NSSM located at: $NssmPath" -ForegroundColor Gray
 
 # === STEP 6: Install service ===
 Write-Host "    Registering Windows service..." -ForegroundColor Gray
