@@ -65,58 +65,46 @@ try {
     exit 1
 }
 
+# === STEP 6: Setting up Python venv + dependencies (robust) ===
 Write-Host "[6/7] Setting up Python venv + dependencies..." -ForegroundColor Green
-& python -m venv "$InstallDir\venv" --clear
-& "$InstallDir\venv\Scripts\pip.exe" install --quiet --upgrade pip 2>$null
-& "$InstallDir\venv\Scripts\pip.exe" install --quiet flask cryptography
-
-# === STEP 5: Download and extract NSSM ===
-Write-Host "[7/7] Installing NSSM service manager..." -ForegroundColor Green
-$NssmZip = "$env:TEMP\nssm.zip"
-$NssmExtract = "$env:TEMP\nssm_extract"
-$NssmPath = "$InstallDir\nssm.exe"
 
 try {
-    Write-Host "    Downloading NSSM from official source..." -ForegroundColor Gray
-    Invoke-WebRequest -Uri $NssmUrl -OutFile $NssmZip -UseBasicParsing
-    
-    Write-Host "    Extracting NSSM..." -ForegroundColor Gray
-    Expand-Archive -Path $NssmZip -DestinationPath $NssmExtract -Force
-    
-    # Detect architecture and copy correct binary
-    if ([Environment]::Is64BitOperatingSystem) {
-        $NssmExe = Get-ChildItem -Path $NssmExtract -Filter "nssm.exe" -Recurse | Where-Object { $_.FullName -like "*win64*" } | Select-Object -First 1
-    } else {
-        $NssmExe = Get-ChildItem -Path $NssmExtract -Filter "nssm.exe" -Recurse | Where-Object { $_.FullName -like "*win32*" } | Select-Object -First 1
-    }
-    
-    if (-not $NssmExe) {
-        Write-Error "Could not find NSSM executable in archive"
-        exit 1
-    }
-    
-    Copy-Item $NssmExe.FullName -Destination $NssmPath -Force
-    
-    # Cleanup
-    Remove-Item $NssmZip -Force -ErrorAction SilentlyContinue
-    Remove-Item $NssmExtract -Recurse -Force -ErrorAction SilentlyContinue
-    
-} catch {
-    Write-Error "Failed to download/extract NSSM: $_"
-    Write-Host "`nTrying fallback method..." -ForegroundColor Yellow
-    
-    # Fallback: Try the GitHub raw link as backup
-    try {
-        $FallbackUrl = "https://raw.githubusercontent.com/Mona-3024/windows_pc_agent/main/nssm.exe"
-        Invoke-WebRequest -Uri $FallbackUrl -OutFile $NssmPath -UseBasicParsing
-    } catch {
-        Write-Error "All download methods failed. Please manually download NSSM from https://nssm.cc/download"
-        exit 1
-    }
-}
+    # Create venv (clear any existing)
+    Write-Host "    Creating virtual environment..." -ForegroundColor Gray
+    & python -m venv "$InstallDir\venv" --clear
 
-if (-not (Test-Path $NssmPath)) {
-    Write-Error "NSSM installation failed. File not found at $NssmPath"
+    $VenvPython = Join-Path $InstallDir "venv\Scripts\python.exe"
+    if (-not (Test-Path $VenvPython)) {
+        Write-Error "Virtualenv python not found at $VenvPython. Venv creation may have failed."
+        exit 1
+    }
+
+    # Always use the venv python to call pip (avoids relying on pip.exe path)
+    Write-Host "    Upgrading pip (using venv python)..." -ForegroundColor Gray
+    & $VenvPython -m pip install --upgrade pip --disable-pip-version-check --no-warn-script-location | Out-Null
+
+    # Install required packages (retry once if network glitch)
+    $packages = "flask", "cryptography"
+    $installSucceeded = $false
+    for ($i = 0; $i -lt 2; $i++) {
+        try {
+            Write-Host "    Installing packages: $($packages -join ', ') (attempt $($i+1))..." -ForegroundColor Gray
+            & $VenvPython -m pip install $packages --disable-pip-version-check --no-warn-script-location
+            $installSucceeded = $true
+            break
+        } catch {
+            Write-Warning "        pip install attempt $($i+1) failed: $_"
+            Start-Sleep -Seconds 2
+        }
+    }
+
+    if (-not $installSucceeded) {
+        Write-Error "Failed to install Python dependencies via pip. Please check network, permissions, or pip logs."
+        exit 1
+    }
+
+} catch {
+    Write-Error "Venv / pip setup failed: $_"
     exit 1
 }
 
