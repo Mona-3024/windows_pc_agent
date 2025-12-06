@@ -15,9 +15,9 @@ from cryptography.hazmat.primitives import serialization
 API_KEY = "admin"
 PORT = 5055
 
-PC_NAME = "Office-PC-01"
-PC_LOCATION = "Head Office"
-PC_OWNER = "John Doe"
+PC_NAME = "Lab PC"
+PC_LOCATION = "Laboratory"
+PC_OWNER = "User"
 
 # Generate or load private key (runs once)
 KEY_FILE = "private_key.pem"
