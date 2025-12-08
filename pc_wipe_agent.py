@@ -182,7 +182,6 @@ def smart_wipe_job(target, method="quick"):
             # Step 2: Remove all directories (including hidden/system)
             wipe_progress = 15
             print("[WIPE] Removing all directory structures...")
-            # Get all folders and delete them one by one
             try:
                 for root, dirs, files in os.walk(drive_path, topdown=False):
                     if stop_flag.is_set():
@@ -200,14 +199,12 @@ def smart_wipe_job(target, method="quick"):
             wipe_progress = 25
             subprocess.call(f'for /d %i in ({drive_path}*) do @rmdir /s /q "%i" >nul 2>&1', shell=True)
             
-            # Step 4: Wipe free space with cipher (overwrites with 0, FF, random)
+            # Step 4: Wipe free space with cipher
             wipe_progress = 40
             print(f"[WIPE] Running cipher /w:{drive_letter} - this may take hours!")
-            print("[WIPE] This will overwrite all free space with zeros, ones, and random data")
             result = subprocess.call(f'cipher /w:{drive_letter}', shell=True)
             wipe_progress = 100
-            print(f"[WIPE] Drive {drive_letter} has been completely and forensically wiped")
-            print(f"[WIPE] All data is now unrecoverable, and all folders have been removed")
+            print(f"[WIPE] Drive {drive_letter} completely wiped")
             
         elif os.path.isfile(wipe_target):
             # Single file wipe
@@ -222,13 +219,11 @@ def smart_wipe_job(target, method="quick"):
             print(f"[WIPE] Securely wiping directory: {wipe_target}")
             wipe_progress = 5
 
-            # Get the drive letter where this directory is located
             target_drive = os.path.splitdrive(os.path.abspath(wipe_target))[0]
             
             total = sum(len(files) for _, _, files in os.walk(wipe_target))
             wiped = 0
 
-            # Step 1: Securely overwrite all files
             for root, dirs, files in os.walk(wipe_target, topdown=False):
                 if stop_flag.is_set():
                     break
@@ -241,23 +236,20 @@ def smart_wipe_job(target, method="quick"):
                         wiped += 1
                         wipe_progress = int((wiped / max(total, 1)) * 60) + 5
                         if wiped % 50 == 0 or wiped == total:
-                            print(f"[WIPE] File overwrite progress: {wipe_progress}% ({wiped}/{total})")
+                            print(f"[WIPE] Progress: {wipe_progress}% ({wiped}/{total})")
                     except Exception as e:
                         print(f"[ERROR] Failed {filepath}: {e}")
 
-            # Step 2: Remove directory structure
             wipe_progress = 70
             print("[WIPE] Removing directory structure...")
             shutil.rmtree(wipe_target, ignore_errors=True)
             
-            # Step 3: Wipe free space on the drive to eliminate recoverable data
             wipe_progress = 75
-            print(f"[WIPE] Wiping free space on drive {target_drive} to prevent recovery...")
-            print(f"[WIPE] Running cipher /w:{target_drive} - this ensures deleted data is unrecoverable")
+            print(f"[WIPE] Wiping free space on drive {target_drive}...")
             subprocess.call(f'cipher /w:{target_drive}', shell=True)
             
             wipe_progress = 100
-            print("[WIPE] Directory and free space completely and irrecoverably wiped")
+            print("[WIPE] Directory completely wiped")
             
     except Exception as e:
         print(f"[WIPE ERROR] {e}")
@@ -306,6 +298,104 @@ def status():
         "completed": is_completed,
         "method": wipe_method
     })
+
+@app.route("/analyze-files", methods=["GET"])
+def analyze_files():
+    """Scan all drives and return file lists for severity analysis"""
+    if not check_auth(request):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        drives_data = {}
+        
+        # For Windows
+        if os.name == 'nt':
+            import string
+            from ctypes import windll
+            
+            # Get all available drives
+            available_drives = []
+            bitmask = windll.kernel32.GetLogicalDrives()
+            for letter in string.ascii_uppercase:
+                if bitmask & 1:
+                    available_drives.append(f"{letter}:")
+                bitmask >>= 1
+            
+            for drive in available_drives:
+                try:
+                    files = []
+                    # Scan up to 1000 files per drive (to prevent timeout)
+                    count = 0
+                    for root, dirs, filenames in os.walk(drive + "\\"):
+                        # Skip system and hidden directories
+                        dirs[:] = [d for d in dirs if not d.startswith('$') 
+                                   and d not in ['System Volume Information', 'Windows', 'ProgramData']]
+                        
+                        for filename in filenames:
+                            if count >= 1000:
+                                break
+                            try:
+                                file_path = os.path.join(root, filename)
+                                files.append(file_path)
+                                count += 1
+                            except:
+                                continue
+                        if count >= 1000:
+                            break
+                    
+                    drives_data[drive] = files
+                except Exception as e:
+                    drives_data[drive] = []
+        
+        # For Linux
+        else:
+            # Get mounted drives
+            with open('/proc/mounts', 'r') as f:
+                mounts = f.readlines()
+            
+            for mount in mounts:
+                parts = mount.split()
+                if len(parts) < 2:
+                    continue
+                
+                device = parts[0]
+                mount_point = parts[1]
+                
+                # Only analyze real drives (skip virtual filesystems)
+                if not device.startswith('/dev/sd') and not device.startswith('/dev/nvme'):
+                    continue
+                
+                try:
+                    files = []
+                    count = 0
+                    for root, dirs, filenames in os.walk(mount_point):
+                        # Skip system directories
+                        dirs[:] = [d for d in dirs if d not in ['proc', 'sys', 'dev', 'run']]
+                        
+                        for filename in filenames:
+                            if count >= 1000:
+                                break
+                            try:
+                                file_path = os.path.join(root, filename)
+                                files.append(file_path)
+                                count += 1
+                            except:
+                                continue
+                        if count >= 1000:
+                            break
+                    
+                    drives_data[device] = files
+                except Exception as e:
+                    drives_data[device] = []
+        
+        return jsonify({
+            "status": "success",
+            "pc_name": PC_NAME,
+            "drives": drives_data
+        })
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/wipe", methods=["POST"])
 def wipe():
